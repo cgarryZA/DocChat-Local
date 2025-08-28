@@ -1,286 +1,289 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 """
-Walks ./Docs, converts documents to Markdown, and writes to ./data/raw
-preserving relative paths.
+Total converter: scans ./Docs and writes Markdown to ./data/raw
+- Non-PDFs: prefer Pandoc for DOCX/RTF/HTML. MD/TXT copied as-is.
+- PDFs: PyMuPDF text; OCR fallback via Tesseract for image pages.
+- .doc handled by: Word COM (pywin32) -> .docx -> Pandoc, else LibreOffice, else instruct user.
 
-- Non-PDFs (docx, doc, txt, html, htm, rtf, odt, md): Pandoc (or copy for .md)
-- PDFs: PyMuPDF text extraction with OCR fallback via Tesseract (optional)
-
-Usage examples:
-  python run_total_convert.py
-  python run_total_convert.py --lang eng+de --dpi 250 --force
-  python run_total_convert.py --no-ocr
-
-Requirements:
-  - Pandoc installed and on PATH (for non-PDF conversions)
-  - pip install: pymupdf markdownify pillow pytesseract (for PDF OCR path)
-  - (Optional) Tesseract binary installed; if not on PATH, use --tesseract PATH
-
-Project structure (assumed):
-  ./Docs/         <-- source files (input)
-  ./data/raw/     <-- destination (output)
+Usage examples (from repo root):
+  python run_total_convert.py --include-md
+  python run_total_convert.py --include-md --no-ocr
+  python run_total_convert.py --include-md --tesseract "C:\\Users\\YOU\\AppData\\Local\\Programs\\Tesseract-OCR\\tesseract.exe" --lang eng+de --dpi 250
 """
-
-import argparse
-import os
-import shutil
-import subprocess
-import sys
+import argparse, os, sys, shutil, subprocess, tempfile
 from pathlib import Path
-from typing import Optional
-import re
+from typing import Optional, Tuple
 
-# --- Project paths (relative to this script) ---
+# Paths
 ROOT = Path(__file__).resolve().parent
 DOCS_DIR = ROOT / "Docs"
-RAW_DIR = ROOT / "data" / "raw"
+OUT_DIR = ROOT / "data" / "raw"
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# --- Pandoc config ---
-PANDOC_OUTPUT_FORMAT = "gfm"  # GitHub-flavored Markdown
+# ---------- helpers ----------
 
-# --- PDF conversion dependencies ---
-IMG_MD_REGEX = re.compile(r'!\[[^\]]*\]\(data:image/[^)]+\)', re.IGNORECASE)
+def which(cmd: str) -> Optional[str]:
+    return shutil.which(cmd)
 
-try:
-    import fitz  # PyMuPDF
-    from markdownify import markdownify as to_md
-    HAVE_PYMUPDF = True
-except Exception:
-    HAVE_PYMUPDF = False
-    to_md = None  # type: ignore
+def run(cmd: list[str]) -> Tuple[int, str, str]:
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    out, err = p.communicate()
+    return p.returncode, out, err
 
-# OCR (optional)
-try:
-    import pytesseract
-    from PIL import Image
-    HAVE_TESSERACT_PY = True
-except Exception:
-    HAVE_TESSERACT_PY = False
+def ensure_parent(p: Path):
+    p.parent.mkdir(parents=True, exist_ok=True)
 
+def log(msg: str): print(msg, flush=True)
+def warn(msg: str): print(f"  [warn] {msg}", flush=True)
+def err(msg: str):  print(f"  [err]  {msg}", flush=True)
 
-def strip_inline_images(md: str) -> str:
-    # Remove base64 inline images from markdownified XHTML
-    md = IMG_MD_REGEX.sub("", md)
-    md = re.sub(r'[ \t]+', ' ', md)
-    md = re.sub(r'\n{3,}', '\n\n', md)
-    return md.strip()
+# ---------- converters ----------
 
-
-def check_pandoc_available() -> bool:
-    try:
-        subprocess.run(["pandoc", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        return True
-    except Exception:
+def convert_with_pandoc(src: Path, dst: Path) -> bool:
+    """Use Pandoc to convert to GitHub-Flavored Markdown."""
+    pandoc = which("pandoc")
+    if not pandoc:
+        warn("Pandoc not found; skipping non-PDF rich formats. Install from https://pandoc.org/installing")
         return False
-
-
-def convert_with_pandoc(src: Path, dst: Path, *, force: bool) -> bool:
-    """Convert non-PDF into Markdown using pandoc. Returns True if written."""
-    if dst.exists() and not force:
-        print(f"  [skip] exists: {dst}")
+    ensure_parent(dst)
+    code, out, e = run([pandoc, str(src), "-t", "gfm", "-o", str(dst)])
+    if code != 0:
+        err(f"pandoc failed for {src}: {e.strip() or out.strip()}")
         return False
-
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    cmd = ["pandoc", str(src), "-t", PANDOC_OUTPUT_FORMAT, "-o", str(dst)]
-    try:
-        subprocess.run(cmd, check=True)
-        print(f"  [ok] pandoc: {src} -> {dst}")
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"  [err] pandoc failed for {src}: {e}")
-        return False
-
-
-def copy_markdown(src: Path, dst: Path, *, force: bool) -> bool:
-    if dst.exists() and not force:
-        print(f"  [skip] exists: {dst}")
-        return False
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dst)
-    print(f"  [ok] copy: {src} -> {dst}")
     return True
 
-
-def page_to_markdown_or_text(page) -> str:
-    """Try PyMuPDF native markdown -> xhtml->markdown (strip <img>) -> plain text."""
-    # 1) native markdown (some builds)
+def convert_doc_to_docx_with_word(src: Path) -> Optional[Path]:
+    """
+    Try Microsoft Word automation (COM) to convert .doc -> .docx.
+    Requires: pip install pywin32   and Word installed.
+    """
     try:
-        md = page.get_text("markdown")
-        if md and md.strip():
-            return md
+        import pythoncom  # type: ignore
+        import win32com.client  # type: ignore
     except Exception:
-        pass
-    # 2) xhtml -> markdown
-    try:
-        html = page.get_text("xhtml")
-        if html:
-            html = re.sub(r'<img[^>]*>', '', html, flags=re.IGNORECASE)
-            md = to_md(html, heading_style="ATX") if to_md else ""
-            if md and md.strip():
-                return md
-    except Exception:
-        pass
-    # 3) plain text
-    try:
-        txt = page.get_text("text")
-        return txt or ""
-    except Exception:
-        return ""
-
-
-def ocr_page_to_text(page, dpi: int, lang: str) -> str:
-    """Render a page to an image and OCR it with pytesseract."""
-    mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
-    pix = page.get_pixmap(matrix=mat, alpha=False)
-    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-    txt = pytesseract.image_to_string(img, lang=lang)
-    return txt or ""
-
-
-def convert_pdf_to_markdown(src: Path, dst: Path, *, lang: str, dpi: int, min_text_chars: int,
-                            ocr_enabled: bool, tesseract_cmd: Optional[str], force: bool) -> bool:
-    """PDF -> Markdown with OCR fallback. Returns True if written."""
-    if not HAVE_PYMUPDF:
-        print("  [err] PyMuPDF / markdownify not installed. pip install pymupdf markdownify", file=sys.stderr)
-        return False
-
-    if dst.exists() and not force:
-        print(f"  [skip] exists: {dst}")
-        return False
-
-    if ocr_enabled and HAVE_TESSERACT_PY and tesseract_cmd:
-        if not Path(tesseract_cmd).exists():
-            print(f"  [warn] tesseract path not found: {tesseract_cmd} -> continuing without OCR", file=sys.stderr)
-            ocr_enabled = False
-        else:
-            pytesseract.pytesseract.tesseract_cmd = tesseract_cmd  # type: ignore
-
-    total_chars = 0
-    parts = []
+        return None
 
     try:
-        doc = fitz.open(str(src))
+        pythoncom.CoInitialize()
+        word = win32com.client.DispatchEx("Word.Application")
+        word.Visible = False
+        doc = word.Documents.Open(str(src))
+        out = src.with_suffix(".docx")
+        # 16 = wdFormatDocumentDefault (.docx)
+        doc.SaveAs(str(out), FileFormat=16)
+        doc.Close(False)
+        word.Quit()
+        log(f"  [ok] Converted {src.name} -> {out.name} via Microsoft Word")
+        return out
     except Exception as e:
-        print(f"  [err] cannot open PDF: {src} ({e})")
+        warn(f"Microsoft Word COM failed for {src.name}: {e}")
+        try:
+            word.Quit()
+        except Exception:
+            pass
+        return None
+    finally:
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+
+def convert_doc_to_docx_with_soffice(src: Path) -> Optional[Path]:
+    """Try LibreOffice headless to turn .doc -> .docx. Returns new path or None."""
+    soffice = which("soffice") or which("soffice.exe")
+    if not soffice:
+        return None
+    with tempfile.TemporaryDirectory() as td:
+        code, out, e = run([soffice, "--headless", "--convert-to", "docx", "--outdir", td, str(src)])
+        if code != 0:
+            warn(f"LibreOffice failed to convert {src.name} -> docx: {e.strip() or out.strip()}")
+            return None
+        out_path = Path(td) / (src.stem + ".docx")
+        if out_path.exists():
+            final = src.with_suffix(".docx")
+            shutil.move(str(out_path), str(final))
+            log(f"  [ok] Converted {src.name} -> {final.name} via LibreOffice")
+            return final
+    return None
+
+def html_to_md_fallback(html: str) -> str:
+    """Prefer markdownify; else fallback to plain text using BeautifulSoup."""
+    try:
+        from markdownify import markdownify as to_md
+        return to_md(html)
+    except Exception:
+        try:
+            from bs4 import BeautifulSoup
+            return BeautifulSoup(html, "lxml").get_text("\n")
+        except Exception:
+            return html  # last resort: raw HTML
+
+def convert_html(src: Path, dst: Path) -> bool:
+    try:
+        html = src.read_text(encoding="utf-8", errors="ignore")
+    except Exception as e:
+        err(f"Failed to read HTML {src}: {e}")
         return False
-
-    with doc:
-        for i, page in enumerate(doc, start=1):
-            md = page_to_markdown_or_text(page)
-            if ocr_enabled and HAVE_TESSERACT_PY and len(md.strip()) < min_text_chars:
-                try:
-                    ocr_txt = ocr_page_to_text(page, dpi=dpi, lang=lang)
-                    if len(ocr_txt.strip()) > len(md.strip()):
-                        md = ocr_txt
-                except Exception as e:
-                    print(f"  [warn] OCR failed on page {i}: {e}", file=sys.stderr)
-
-            total_chars += len(md)
-            parts.append(f"<!-- page:{i} -->\n\n{md}")
-
-    out = strip_inline_images("\n\n".join(parts))
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    dst.write_text(out, encoding="utf-8")
-
-    if total_chars < min_text_chars:
-        print("  [warn] Very little text extracted; PDF may be mostly images. Consider OCR / higher DPI.")
-
-    print(f"  [ok] pdf: {src} -> {dst}  ({total_chars} chars)")
+    md = html_to_md_fallback(html)
+    ensure_parent(dst)
+    dst.write_text(md, encoding="utf-8")
     return True
 
+def pdf_to_md_pymupdf(src: Path) -> str:
+    """Extract text/markdown per page with PyMuPDF; no OCR here."""
+    try:
+        import fitz  # PyMuPDF
+    except Exception as e:
+        raise RuntimeError("PyMuPDF (pymupdf) is required for PDF text parsing.") from e
+    text_parts = []
+    with fitz.open(str(src)) as doc:
+        for page in doc:
+            try:
+                text_parts.append(page.get_text("text"))
+            except Exception:
+                text_parts.append(page.get_text())
+    return "\n\n".join(text_parts).strip()
 
-def build_argparser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(description="Convert Docs/ -> data/raw/ preserving relative paths.")
-    ap.add_argument("--lang", default="eng", help="Tesseract languages (e.g., 'eng', or 'eng+de'). Default: eng")
-    ap.add_argument("--dpi", type=int, default=200, help="OCR render DPI (default: 200)")
-    ap.add_argument("--min-text", type=int, default=120, help="Min chars per page to skip OCR (default: 120)")
-    ap.add_argument("--tesseract", dest="tesseract_cmd", default=None, help="Path to tesseract.exe if not on PATH")
-    ap.add_argument("--no-ocr", action="store_true", help="Disable OCR fallback for PDFs")
-    ap.add_argument("--force", action="store_true", default=False, help=argparse.SUPPRESS)  # backward compat
-    ap.add_argument("--overwrite", action="store_true", help="Overwrite existing outputs")
-    ap.add_argument("--include-md", action="store_true", help="Also copy .md files from Docs to data/raw")
-    return ap
+def ocr_pdf_with_tesseract(src: Path, lang: str, dpi: int, tesseract_path: Optional[str]) -> str:
+    """OCR each page image then concatenate text."""
+    try:
+        import fitz
+        from PIL import Image
+        import pytesseract
+    except Exception as e:
+        raise RuntimeError("OCR requires: pymupdf, pillow, pytesseract") from e
+    if tesseract_path:
+        pytesseract.pytesseract.tesseract_cmd = tesseract_path
 
+    lines: list[str] = []
+    with fitz.open(str(src)) as doc:
+        for i, page in enumerate(doc, start=1):
+            pix = page.get_pixmap(dpi=dpi)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            try:
+                txt = pytesseract.image_to_string(img, lang=lang)
+            except Exception as e:
+                warn(f"OCR fail on page {i}: {e}")
+                txt = ""
+            lines.append(txt.strip())
+    return "\n\n".join(lines).strip()
+
+def convert_pdf(src: Path, dst: Path, use_ocr: bool, lang: str, dpi: int, tesseract_path: Optional[str]) -> bool:
+    """Try text extraction; if text looks empty and OCR allowed, OCR it."""
+    try:
+        text = pdf_to_md_pymupdf(src)
+    except Exception as e:
+        warn(f"PDF text pass failed ({e}); trying OCR {'ENABLED' if use_ocr else 'DISABLED'}")
+        text = ""
+
+    if use_ocr and len(text.strip()) < 40:
+        try:
+            text = ocr_pdf_with_tesseract(src, lang, dpi, tesseract_path)
+        except Exception as e:
+            warn(f"OCR pass failed: {e}")
+
+    text = text.strip()
+    if not text:
+        warn(f"No extractable text for {src.name}.")
+        return False
+
+    ensure_parent(dst)
+    dst.write_text(text, encoding="utf-8")
+    return True
+
+# ---------- main ----------
 
 def main():
-    args = build_argparser().parse_args()
-    ocr_enabled = not args.no_ocr
+    ap = argparse.ArgumentParser(description="Convert Docs/ -> data/raw as Markdown/text.")
+    ap.add_argument("--include-md", action="store_true", help="Also copy .md files to data/raw.")
+    ap.add_argument("--no-ocr", action="store_true", help="Disable OCR fallback for PDFs.")
+    ap.add_argument("--tesseract", default="", help="Full path to tesseract.exe (optional).")
+    ap.add_argument("--lang", default="eng", help="OCR languages, e.g. 'eng+de'.")
+    ap.add_argument("--dpi", type=int, default=200, help="OCR rendering DPI (default 200).")
+    args = ap.parse_args()
 
-    RAW_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Supported by pandoc (input side) that we’ll route through pandoc:
-    pandoc_exts = {".docx", ".doc", ".txt", ".html", ".htm", ".rtf", ".odt", ".pptx", ".ppt"}
-    # We’ll optionally copy .md as-is (if --include-md)
-    md_ext = ".md"
-
-    have_pandoc = check_pandoc_available()
-    if not have_pandoc:
-        print("ℹ️  pandoc not found on PATH. Non-PDFs will be skipped.", file=sys.stderr)
-
-    # Walk Docs/
     if not DOCS_DIR.exists():
-        print(f"[err] Docs directory not found: {DOCS_DIR}", file=sys.stderr)
-        sys.exit(1)
+        log(f"Docs folder not found: {DOCS_DIR}")
+        sys.exit(0)
 
+    log(f"Scanning: {DOCS_DIR}")
     converted = 0
     skipped = 0
-    errors = 0
+    errs = 0
 
-    print(f"Scanning: {DOCS_DIR}")
     for src in DOCS_DIR.rglob("*"):
-        if not src.is_file():
+        if src.is_dir():
             continue
-        if src.name.startswith("~"):  # skip temp files
-            continue
-
-        rel = src.relative_to(DOCS_DIR)  # path under Docs/
-        out_rel = rel.with_suffix(".md")
-        dst = RAW_DIR / out_rel
+        rel = src.relative_to(DOCS_DIR)
+        out = (OUT_DIR / rel).with_suffix(".md")
 
         ext = src.suffix.lower()
-
         try:
             if ext == ".pdf":
-                ok = convert_pdf_to_markdown(
-                    src, dst,
-                    lang=args.lang,
-                    dpi=args.dpi,
-                    min_text_chars=args.min_text,
-                    ocr_enabled=ocr_enabled,
-                    tesseract_cmd=args.tesseract_cmd,
-                    force=args.overwrite or args.force,
-                )
-                if ok: converted += 1
-                else: skipped += 1
-
-            elif ext in pandoc_exts:
-                if not have_pandoc:
-                    print(f"  [skip] pandoc missing -> {src}")
-                    skipped += 1
+                ok = convert_pdf(src, out, use_ocr=not args.no_ocr, lang=args.lang, dpi=args.dpi, tesseract_path=args.tesseract or None)
+                if ok:
+                    log(f"  [ok] PDF -> {out.relative_to(OUT_DIR)}")
+                    converted += 1
                 else:
-                    ok = convert_with_pandoc(src, dst, force=args.overwrite or args.force)
-                    if ok: converted += 1
-                    else: skipped += 1
+                    skipped += 1
 
-            elif ext == md_ext and args.include_md:
-                ok = copy_markdown(src, dst, force=args.overwrite or args.force)
-                if ok: converted += 1
-                else: skipped += 1
+            elif ext in {".md"}:
+                if args.include_md:
+                    if out.exists() and out.read_text(encoding="utf-8", errors="ignore") == src.read_text(encoding="utf-8", errors="ignore"):
+                        log(f"  [skip] exists: {out}")
+                        skipped += 1
+                    else:
+                        ensure_parent(out)
+                        shutil.copy2(src, out)
+                        log(f"  [ok] Copied MD -> {out.relative_to(OUT_DIR)}")
+                        converted += 1
+                else:
+                    skipped += 1
+
+            elif ext in {".txt"}:
+                ensure_parent(out)
+                shutil.copy2(src, out)
+                log(f"  [ok] Copied TXT -> {out.relative_to(OUT_DIR)}")
+                converted += 1
+
+            elif ext in {".html", ".htm"}:
+                if convert_html(src, out):
+                    log(f"  [ok] HTML -> {out.relative_to(OUT_DIR)}")
+                    converted += 1
+                else:
+                    skipped += 1
+
+            elif ext in {".docx", ".rtf"}:
+                if convert_with_pandoc(src, out):
+                    log(f"  [ok] Pandoc -> {out.relative_to(OUT_DIR)}")
+                    converted += 1
+                else:
+                    skipped += 1
+
+            elif ext == ".doc":
+                # Try Word COM first, then LibreOffice, then instruct user
+                new_src = convert_doc_to_docx_with_word(src) or convert_doc_to_docx_with_soffice(src)
+                if new_src and convert_with_pandoc(new_src, out):
+                    log(f"  [ok] DOC->DOCX->MD -> {out.relative_to(OUT_DIR)}")
+                    converted += 1
+                else:
+                    err("Cannot convert .doc directly. Use Word: Save As .docx, then rerun.")
+                    skipped += 1
 
             else:
-                # Ignore other file types silently
-                continue
+                log(f"  [skip] unsupported: {src.name}")
+                skipped += 1
 
         except Exception as e:
-            errors += 1
-            print(f"  [err] {src}: {e}", file=sys.stderr)
+            err(f"{src.name}: {e}")
+            errs += 1
 
-    print("\nSummary:")
-    print(f"  Converted: {converted}")
-    print(f"  Skipped:   {skipped}")
-    print(f"  Errors:    {errors}")
-    print(f"Output root: {RAW_DIR}")
-
+    log("\nSummary:")
+    log(f"  Converted: {converted}")
+    log(f"  Skipped:   {skipped}")
+    log(f"  Errors:    {errs}")
+    log(f"Output root: {OUT_DIR}")
 
 if __name__ == "__main__":
     main()

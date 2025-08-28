@@ -5,7 +5,7 @@
 #   -NoOCR                                 (disable OCR fallback entirely)
 
 param(
-  [string]$Tesseract = "",   # e.g. "C:\Users\YOU\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
+  [string]$Tesseract = "",  # e.g. C:\Users\<you>\AppData\Local\Programs\Tesseract-OCR\tesseract.exe
   [switch]$NoOCR
 )
 
@@ -13,7 +13,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 # Go to repo root
-$repo = Split-Path $MyInvocation.MyCommand.Path -Parent | Split-Path
+$repo = Split-Path -Parent $PSCommandPath | Split-Path
 Set-Location $repo
 
 # 1) Venv + deps
@@ -31,41 +31,40 @@ if ([string]::IsNullOrWhiteSpace($env:OLLAMA_HOST)) { $env:OLLAMA_HOST = "http:/
 if ([string]::IsNullOrWhiteSpace($env:OLLAMA_MODEL)) { $env:OLLAMA_MODEL = "qwen2.5:3b-instruct" }
 
 try {
-  $tags = Invoke-WebRequest -UseBasicParsing -Uri "$env:OLLAMA_HOST/api/tags" -TimeoutSec 3
+  $tags = Invoke-WebRequest -UseBasicParsing -Uri "$env:OLLAMA_HOST/api/tags" -TimeoutSec 3 -ErrorAction Stop
   if ($tags.StatusCode -eq 200) {
-    Write-Host "✅ Ollama reachable. Ensuring model: $env:OLLAMA_MODEL"
-    Invoke-WebRequest -UseBasicParsing -Method POST -Uri "$env:OLLAMA_HOST/api/pull" `
-      -Body (@{ name = $env:OLLAMA_MODEL } | ConvertTo-Json) -ContentType "application/json" | Out-Null
+    Write-Host "Ollama reachable. Ensuring model: $env:OLLAMA_MODEL"
+    $body = @{ name = $env:OLLAMA_MODEL } | ConvertTo-Json -Compress
+    Invoke-WebRequest -UseBasicParsing -Method Post -Uri "$env:OLLAMA_HOST/api/pull" -Body $body -ContentType "application/json" | Out-Null
   } else {
-    Write-Host "⚠️  Ollama API not responding. Start Ollama (ollama serve) to enable answers." -ForegroundColor Yellow
+    Write-Host "Ollama API not responding. Start Ollama (ollama serve) to enable answers." -ForegroundColor Yellow
   }
 } catch {
-  Write-Host "⚠️  Ollama not found or not running. Install from https://ollama.com/download and run 'ollama serve'." -ForegroundColor Yellow
+  Write-Host "Ollama not found or not running. Install from https://ollama.com/download and run 'ollama serve'." -ForegroundColor Yellow
 }
 
-# 3b) Optional: wire up Tesseract for this session if a path was provided
+# 3b) Optional: wire up Tesseract if a path was provided
 $convertArgs = @("--include-md")
 if ($NoOCR) { $convertArgs += "--no-ocr" }
 
 if (-not [string]::IsNullOrWhiteSpace($Tesseract)) {
-  if (-not (Test-Path $Tesseract)) {
-    Write-Host "⚠️  Tesseract path not found: $Tesseract  (continuing without OCR)" -ForegroundColor Yellow
+  if (-not (Test-Path -LiteralPath $Tesseract)) {
+    Write-Host "Tesseract path not found: $Tesseract  (continuing without OCR)" -ForegroundColor Yellow
     $convertArgs += "--no-ocr"
   } else {
     $convertArgs += @("--tesseract", $Tesseract)
-    $tessDir = Split-Path $Tesseract -Parent
-    # make sure tessdata is discoverable for this shell
+    $tessDir = Split-Path -Parent $Tesseract
     $env:Path = "$env:Path;$tessDir"
     $env:TESSDATA_PREFIX = Join-Path $tessDir "tessdata"
   }
 }
 
-# 3c) Nice-to-have: warn if Pandoc missing (non-PDF conversions)
+# 3c) Warn if Pandoc missing (non-PDF conversions)
 if (-not (Get-Command pandoc -ErrorAction SilentlyContinue)) {
-  Write-Host "ℹ️  Pandoc not found. DOCX/RTF/HTML will be skipped. Install from https://pandoc.org/installing" -ForegroundColor Yellow
+  Write-Host "Pandoc not found. DOCX/RTF/HTML will be skipped. Install from https://pandoc.org/installing" -ForegroundColor Yellow
 }
 
-# 4) Convert Docs -> data/raw (uses pandoc when available, PyMuPDF for PDFs)
+# 4) Convert Docs -> data/raw (Pandoc for non-PDFs, PyMuPDF for PDFs, OCR if available)
 python .\run_total_convert.py @convertArgs
 
 # 5) Ingest
