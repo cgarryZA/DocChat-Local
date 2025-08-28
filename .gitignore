@@ -1,0 +1,16 @@
+# venv & Python cache
+.venv/
+__pycache__/
+*.pyc
+
+# data + indexes
+data/index/*
+!data/index/.gitkeep
+data/raw/*
+!data/raw/.gitkeep
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
