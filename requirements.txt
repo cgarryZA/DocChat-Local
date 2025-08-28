@@ -15,6 +15,9 @@ markdownify==0.13.1
 pymupdf==1.24.10
 pillow==10.4.0
 pytesseract==0.3.13
+pandas==2.2.2
+openpyxl==3.1.5
+xlrd==2.0.1
 
 # Markdown rendering for /view
 markdown==3.7
