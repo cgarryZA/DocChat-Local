@@ -8,6 +8,8 @@ data/index/*
 !data/index/.gitkeep
 data/raw/*
 !data/raw/.gitkeep
+Docs/**
+!Docs/.gitkeep
 
 # OS / editor
 .DS_Store
