@@ -1,6 +1,6 @@
-📘 Manuals RAG (CPU-only, local)
+📘 Manuals RAG (CPU-only, Local)
 
-Ask questions about your manuals. Everything runs on your machine:
+Ask questions about your manuals — everything runs on your machine:
 
 CPU models via Ollama
 
@@ -8,174 +8,158 @@ Your docs stay local
 
 Clickable citations to exact sections
 
-0) Prereqs you need (once)
+Table of Contents
 
-You only need to install these one time:
+Prerequisites (install once)
 
-Python 3.10+ (recommended 3.11)
+Install on Windows
 
-Ollama (local LLM runtime) 
+Clone & Add Manuals
 
-Pandoc (recommended for DOCX/DOC/RTF/HTML → Markdown)
+Run (One Command)
 
-Tesseract OCR (optional; for scanned PDFs only)
+Ask Questions
 
-Git (to clone the repo)
+Update Manuals Later
 
-If you skip Pandoc, we’ll still ingest PDF/MD/TXT.
-If you skip Tesseract, scanned PDFs (images only) won’t be readable.
+Configuration (optional)
 
-1) Install the prerequisites
-Windows (PowerShell)
+Troubleshooting
 
-Python
+Prerequisites (install once)
+Tool	Why you need it	Required?
+Python 3.10+ (3.11 recommended)	Run the app & scripts	✅
+Ollama	Local LLM runtime (CPU)	✅
+Pandoc	Best conversion of DOCX/DOC/RTF/HTML → Markdown	⭐ Recommended
+Tesseract OCR	Extract text from scanned PDFs (images only)	➖ Optional
+Git	Clone this repository	✅
 
-Install from Microsoft Store or python.org.
+If you skip Pandoc, we still index PDF / MD / TXT.
+If you skip Tesseract, scanned PDFs (image-only) won’t produce text.
 
-After install:
+Install on Windows
+
+Open PowerShell and follow these steps.
+
+1) Python
+
+Install from the Microsoft Store or python.org
+.
+Verify:
 
 py --version
 
+2) Ollama
 
-Ollama
+Download & install: https://ollama.com/download
 
-Download & install from https://ollama.com/download
-
-Start it:
+Start it in a separate PowerShell window and leave it running:
 
 ollama serve
 
 
-Leave this window open.
+(First time? You can pre-pull the model: ollama pull qwen2.5:3b-instruct)
 
-Pandoc (recommended)
+3) Pandoc (recommended)
 
-Download installer from https://pandoc.org/installing.html
+Download: https://pandoc.org/installing.html
 
 Verify:
 
 pandoc --version
 
+4) Tesseract OCR (optional; for scanned PDFs)
 
-Tesseract OCR (optional; for scanned PDFs)
+Install (UB Mannheim Windows build):
+https://github.com/UB-Mannheim/tesseract/wiki
 
-Install the Windows build from https://github.com/UB-Mannheim/tesseract/wiki?utm_source=chatgpt.com
+Option A — Add to PATH (so tesseract works everywhere):
 
-Add Tesseract to Path
-
+# Replace <youruser> with your Windows username if you used a per-user install
 $dir = "C:\Users\<youruser>\AppData\Local\Programs\Tesseract-OCR"
 $env:Path = "$env:Path;$dir"
 setx PATH "$env:Path;$dir" > $null
 setx TESSDATA_PREFIX "$dir\tessdata" > $null
-
-Verify:
-
+# Close & reopen PowerShell, then:
 tesseract --version
 
 
-Git
+Option B — Skip PATH changes: you can pass the full path to tesseract.exe to the bootstrap script later.
 
-Install from https://git-scm.com/
+5) Git
+
+Install: https://git-scm.com/
 
 Verify:
 
 git --version
 
-
-No admin / locked-down PCs?
-You can still run everything: install Ollama & Python normally, and skip Pandoc/Tesseract (or use their user installers). The app will still index PDF/MD/TXT.
-
-macOS (Terminal)
-# 1) Homebrew (if you don't have it)
-# /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-# 2) Python
-brew install python@3.11
-
-# 3) Ollama (then run `ollama serve` in a separate terminal)
-brew install --cask ollama
-
-# 4) Pandoc (recommended)
-brew install pandoc
-
-# 5) Tesseract OCR (optional; for scanned PDFs)
-brew install tesseract
-
-# 6) Git
-brew install git
-
-
-Open a new terminal and start Ollama:
-
-ollama serve
-
-Ubuntu/Debian (Terminal)
-# Python + Git
-sudo apt-get update
-sudo apt-get install -y python3 python3-venv python3-pip git
-
-# Ollama (follow their site for the latest install method; then:)
-ollama serve   # in a separate terminal
-
-# Pandoc (recommended)
-sudo apt-get install -y pandoc
-
-# Tesseract OCR (optional; for scanned PDFs)
-sudo apt-get install -y tesseract-ocr
-
-2) Clone the repo & add your manuals
+Clone & Add Manuals
 git clone <YOUR_REPO_URL>
 cd DOCS-LLM
 
 
-Put your files under Docs/ (subfolders OK). Supported:
+Place your manuals under Docs/ (subfolders OK).
 
-PDF (text-based works out of the box; scanned needs Tesseract to OCR)
+Supported:
 
-DOCX / DOC / RTF / HTML / TXT / MD (Pandoc recommended for best results)
+PDF (text-based out of the box; scanned needs Tesseract)
 
-3) Run the project (one command)
-Windows (PowerShell)
-# Make sure Ollama is running in a separate window:  ollama serve
+DOCX / DOC / RTF / HTML / TXT / MD (best with Pandoc)
+
+Run (One Command)
+
+Keep Ollama running in another window (ollama serve), then:
+
 powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1
 
-macOS / Linux
-# Make sure Ollama is running in a separate terminal:  ollama serve
-./scripts/bootstrap.sh
+
+If Tesseract isn’t on PATH, pass its full path:
+
+powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1 `
+  -Tesseract "C:\Users\<youruser>\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
 
 
-This command will:
+To skip OCR entirely (fastest, text-only PDFs):
 
-Create a virtualenv and install pinned dependencies
+powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1 -NoOCR
 
-(If Ollama is reachable) pull the model (default: qwen2.5:3b-instruct)
 
-Convert everything in Docs/ → Markdown in data/raw/
+What the script does:
 
-Pandoc for non-PDFs (if available)
+Creates a virtual environment and installs pinned dependencies
 
-PyMuPDF for PDFs; OCR fallback if Tesseract is installed
+If Ollama is reachable, pulls the model (qwen2.5:3b-instruct)
 
-Build the FAISS index in data/index/
+Converts Docs/ → Markdown in data/raw/
 
-Serve the app at: http://localhost:8000/ui/
+Pandoc for non-PDFs (if installed)
 
-4) Ask questions
+PyMuPDF for PDFs, Tesseract OCR fallback if available
 
-Open: http://localhost:8000/ui/
+Builds the FAISS index in data/index/
 
-Type a question (e.g., “How do I reset the device to factory settings?”).
-Click citation chips to jump to the exact section.
+Serves the UI at http://localhost:8000/ui/
 
-5) Updating docs later
+Ask Questions
 
-Add/modify files in Docs/, then either re-run the bootstrap script or:
+Open http://localhost:8000/ui/
 
-python run_total_convert.py --include-md
+Ask something like “How do I reset the device to factory settings?”
+Click citation chips to jump to the exact section of your manual.
+
+Update Manuals Later
+
+After adding/modifying files in Docs/, either re-run the bootstrap script or:
+
+# Convert Docs -> data/raw
+python .\run_total_convert.py --include-md
+# Rebuild the index
 python -m app.ingest
+# Serve (if not already running)
 uvicorn app.server:app --host 0.0.0.0 --port 8000 --reload
 
-6) Configuration (optional)
+Configuration (optional)
 
 Create a .env (or copy .env.example) to override defaults:
 
@@ -186,46 +170,43 @@ CHUNK_TOKENS=900
 CHUNK_OVERLAP=120
 TOP_K=8
 
-7) Troubleshooting
-
+Troubleshooting
 “500 on /ask”
-Make sure Ollama is running and the model is present:
 
-ollama serve                  # in a separate terminal
+Ensure Ollama is running and the model exists:
+
+ollama serve
 ollama pull qwen2.5:3b-instruct
 curl http://localhost:11434/api/tags
 
-
 “No context found”
+
 Check converted files exist in data/raw/ and re-ingest:
 
-python run_total_convert.py --include-md
+python .\run_total_convert.py --include-md
 python -m app.ingest
 
-
 FAISS / NumPy error
-This repo pins compatible versions. If you upgraded, roll back:
+
+This repo pins compatible versions; if you upgraded, roll back:
 
 pip install --upgrade "numpy<2" "faiss-cpu==1.7.4"
 
-
 Scanned PDFs show little/no text
-Install Tesseract, then re-convert:
 
-# Windows/macOS: install Tesseract (see step 1)
-# Linux (Debian/Ubuntu):
-sudo apt-get install -y tesseract-ocr
+Install Tesseract, then re-convert and re-ingest:
 
-# Re-run conversion + ingest
-python run_total_convert.py --include-md
+python .\run_total_convert.py --include-md
 python -m app.ingest
 
-
 DOCX/DOC/RTF/HTML not converting
-Install Pandoc and re-run the bootstrap/conversion.
 
-That’s it ✅
+Install Pandoc, then re-run the bootstrap or conversion.
 
+Healthcheck: http://localhost:8000/health
+
+API docs: http://localhost:8000/docs
+
+That’s it.
 Install prereqs → put manuals in Docs/ → run the bootstrap → open /ui.
-
 Everything stays local; no cloud services required.
