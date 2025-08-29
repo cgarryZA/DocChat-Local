@@ -8,15 +8,15 @@ Total converter: scans ./Docs and writes Markdown to ./data/raw
 - .doc handled by:
     1) Microsoft Word COM (pywin32) in a helper process (timeout, no dialogs)
     2) LibreOffice headless (soffice) fallback
-    3) If both fail, instruct user (but DO NOT delete .doc even with --delete-unsupported)
+    3) If both fail, instruct user (but DO NOT delete .doc even with --keep-unsupported)
 - Spreadsheets:
     - CSV/TSV -> Markdown table
     - XLSX (and XLS if engine available) -> Markdown with one section per sheet
 
-Flags:
-  --delete-source-on-success     Delete the original file when its conversion succeeded
-  --delete-unsupported           Delete files with unsupported extensions (never deletes .doc)
-  --delete-source-if-up-to-date  Delete the source if skipped because the output is already up-to-date
+Flags (defaults are DESTRUCTIVE on success/unsupported):
+  --keep-source-on-success       KEEP original when conversion succeeds (default is delete)
+  --keep-unsupported             KEEP files with unsupported extensions (default is delete; never deletes .doc)
+  --keep-source-if-up-to-date    KEEP source if skipped as up-to-date (default is delete)
   --max-rows-per-sheet N         Limit rows emitted per sheet (CSV/XLSX/XLS). Default 2000.
   --soffice PATH                 Explicit path to soffice(.exe) (overrides auto-detect)
   --no-word                      Skip Word COM for .doc (use only LibreOffice if present)
@@ -24,8 +24,8 @@ Flags:
 
 Usage examples (from repo root):
   python run_total_convert.py --include-md
-  python run_total_convert.py --include-md --delete-source-if-up-to-date
-  python run_total_convert.py --include-md --delete-source-on-success --delete-unsupported
+  python run_total_convert.py --include-md --keep-source-if-up-to-date
+  python run_total_convert.py --include-md --keep-source-on-success --keep-unsupported
   python run_total_convert.py --include-md --soffice "C:\\Program Files\\LibreOffice\\program\\soffice.exe"
 """
 
@@ -217,12 +217,12 @@ def convert_with_pandoc(src: Path, dst: Path) -> bool:
     code, out, e = run([pandoc, str(src), "-t", "gfm", "-o", str(dst)])
     if code != 0:
         err(f"pandoc failed for {src}: {e.strip() or out.strip()}")
-        return False
+    # touch dst to src mtime
     try:
         os.utime(dst, (src.stat().st_atime, src.stat().st_mtime))
     except Exception:
         pass
-    return True
+    return code == 0
 
 # ---------- .doc helpers ----------
 
@@ -550,9 +550,10 @@ def main():
     ap.add_argument("--tesseract", default="", help="Full path to tesseract.exe (optional).")
     ap.add_argument("--lang", default="eng", help="OCR languages, e.g. 'eng+de'.")
     ap.add_argument("--dpi", type=int, default=200, help="OCR rendering DPI (default 200).")
-    ap.add_argument("--delete-unsupported", action="store_true", help="Delete unsupported source files by type (excludes .doc).")
-    ap.add_argument("--delete-source-on-success", action="store_true", help="Delete original file when conversion succeeds.")
-    ap.add_argument("--delete-source-if-up-to-date", action="store_true", help="Delete original file when skipped as up-to-date.")
+    # Inverted deletion flags: KEEP instead of DELETE
+    ap.add_argument("--keep-unsupported", action="store_true", help="Keep unsupported source files by type (default deletes; excludes .doc).")
+    ap.add_argument("--keep-source-on-success", action="store_true", help="Keep original file when conversion succeeds (default deletes).")
+    ap.add_argument("--keep-source-if-up-to-date", action="store_true", help="Keep original file when skipped as up-to-date (default deletes).")
     ap.add_argument("--doc-timeout", type=int, default=60, help="Timeout (seconds) for Word COM .doc -> .docx conversion.")
     ap.add_argument("--no-word", action="store_true", help="Do not use Microsoft Word COM for .doc (use LibreOffice only if present).")
     ap.add_argument("--max-rows-per-sheet", type=int, default=2000, help="Row limit per sheet for CSV/Excel output (0 = no limit).")
@@ -564,10 +565,21 @@ def main():
         log(f"Docs folder not found: {DOCS_DIR}")
         sys.exit(0)
 
+    # Effective deletion booleans (defaults are destructive)
+    delete_unsupported_default = not args.keep_unsupported
+    delete_on_success_default = not args.keep_source_on_success
+    delete_if_up_to_date_default = not args.keep_source_if_up_to_date
+
     # Resolve soffice once
     soffice_path = find_soffice(args.soffice.strip() or None)
     if soffice_path:
         log(f"[soffice] Using: {soffice_path}")
+
+    # Pre-sweep: remove any empty dirs before we start
+    if not args.no_prune_empty_dirs:
+        log("Pre-sweep: pruning empty directories...")
+        prune_all_empty_dirs(DOCS_DIR)
+        prune_all_empty_dirs(OUT_DIR)
 
     # Gather files (skip folders)
     all_files = [p for p in DOCS_DIR.rglob("*") if p.is_file()]
@@ -588,7 +600,7 @@ def main():
                 # Global fast path: if output is already up-to-date, skip and (optionally) delete source
                 if ext not in {".md"} and file_up_to_date(src, out):
                     log(f"  [skip] up-to-date: {rel}")
-                    delete_on_up_to_date(src, args.delete_source_if_up_to_date)
+                    delete_on_up_to_date(src, delete_if_up_to_date_default)
                     if not args.no_prune_empty_dirs:
                         prune_empty_dirs_upwards((DOCS_DIR / rel).parent, DOCS_DIR)
                     skipped += 1
@@ -604,8 +616,8 @@ def main():
                     if ok:
                         log(f"  [ok] PDF -> {out.relative_to(OUT_DIR)}")
                         converted += 1
-                        delete_on_success(src, args.delete_source_on_success)
-                        if not args.no_prune_empty_dirs and args.delete_source_on_success:
+                        delete_on_success(src, delete_on_success_default)
+                        if not args.no_prune_empty_dirs and delete_on_success_default:
                             prune_empty_dirs_upwards(src.parent, DOCS_DIR)
                     else:
                         skipped += 1
@@ -615,7 +627,7 @@ def main():
                         try:
                             if out.exists() and out.read_text(encoding="utf-8", errors="ignore") == src.read_text(encoding="utf-8", errors="ignore"):
                                 log(f"  [skip] up-to-date: {rel}")
-                                delete_on_up_to_date(src, args.delete_source_if_up_to_date)
+                                delete_on_up_to_date(src, delete_if_up_to_date_default)
                                 if not args.no_prune_empty_dirs:
                                     prune_empty_dirs_upwards(src.parent, DOCS_DIR)
                                 skipped += 1
@@ -624,8 +636,8 @@ def main():
                                 shutil.copy2(src, out)
                                 log(f"  [ok] Copied MD -> {out.relative_to(OUT_DIR)}")
                                 converted += 1
-                                delete_on_success(src, args.delete_source_on_success)
-                                if not args.no_prune_empty_dirs and args.delete_source_on_success:
+                                delete_on_success(src, delete_on_success_default)
+                                if not args.no_prune_empty_dirs and delete_on_success_default:
                                     prune_empty_dirs_upwards(src.parent, DOCS_DIR)
                         except Exception as e:
                             err(f"{src.name}: {e}")
@@ -636,7 +648,7 @@ def main():
                 elif ext == ".txt":
                     if file_up_to_date(src, out):
                         log(f"  [skip] up-to-date: {rel}")
-                        delete_on_up_to_date(src, args.delete_source_if_up_to_date)
+                        delete_on_up_to_date(src, delete_if_up_to_date_default)
                         if not args.no_prune_empty_dirs:
                             prune_empty_dirs_upwards(src.parent, DOCS_DIR)
                         skipped += 1
@@ -645,16 +657,16 @@ def main():
                         shutil.copy2(src, out)
                         log(f"  [ok] Copied TXT -> {out.relative_to(OUT_DIR)}")
                         converted += 1
-                        delete_on_success(src, args.delete_source_on_success)
-                        if not args.no_prune_empty_dirs and args.delete_source_on_success:
+                        delete_on_success(src, delete_on_success_default)
+                        if not args.no_prune_empty_dirs and delete_on_success_default:
                             prune_empty_dirs_upwards(src.parent, DOCS_DIR)
 
                 elif ext in {".html", ".htm"}:
                     if convert_html(src, out):
                         log(f"  [ok] HTML -> {out.relative_to(OUT_DIR)}")
                         converted += 1
-                        delete_on_success(src, args.delete_source_on_success)
-                        if not args.no_prune_empty_dirs and args.delete_source_on_success:
+                        delete_on_success(src, delete_on_success_default)
+                        if not args.no_prune_empty_dirs and delete_on_success_default:
                             prune_empty_dirs_upwards(src.parent, DOCS_DIR)
                     else:
                         skipped += 1
@@ -663,8 +675,8 @@ def main():
                     if convert_with_pandoc(src, out):
                         log(f"  [ok] Pandoc -> {out.relative_to(OUT_DIR)}")
                         converted += 1
-                        delete_on_success(src, args.delete_source_on_success)
-                        if not args.no_prune_empty_dirs and args.delete_source_on_success:
+                        delete_on_success(src, delete_on_success_default)
+                        if not args.no_prune_empty_dirs and delete_on_success_default:
                             prune_empty_dirs_upwards(src.parent, DOCS_DIR)
                     else:
                         skipped += 1
@@ -674,7 +686,7 @@ def main():
                     docx_path = src.with_suffix(".docx")
                     if docx_path.exists():
                         log(f"  [skip] .docx present; skipping {rel}")
-                        delete_on_up_to_date(src, args.delete_source_if_up_to_date)
+                        delete_on_up_to_date(src, delete_if_up_to_date_default)
                         if not args.no_prune_empty_dirs:
                             prune_empty_dirs_upwards(src.parent, DOCS_DIR)
                         skipped += 1
@@ -682,7 +694,7 @@ def main():
 
                     if out.exists() and file_up_to_date(src, out):
                         log(f"  [skip] up-to-date: {rel}")
-                        delete_on_up_to_date(src, args.delete_source_if_up_to_date)
+                        delete_on_up_to_date(src, delete_if_up_to_date_default)
                         if not args.no_prune_empty_dirs:
                             prune_empty_dirs_upwards(src.parent, DOCS_DIR)
                         skipped += 1
@@ -697,8 +709,8 @@ def main():
                     if new_src and convert_with_pandoc(new_src, out):
                         log(f"  [ok] DOC->DOCX->MD -> {out.relative_to(OUT_DIR)}")
                         converted += 1
-                        delete_on_success(src, args.delete_source_on_success)
-                        if args.delete_source_on_success and new_src.exists():
+                        delete_on_success(src, delete_on_success_default)
+                        if delete_on_success_default and new_src.exists():
                             try:
                                 new_src.unlink()
                                 try:
@@ -708,7 +720,7 @@ def main():
                                 log(f"  [del ] intermediate removed: {rel_new}")
                             except Exception:
                                 pass
-                        if not args.no_prune_empty_dirs and args.delete_source_on_success:
+                        if not args.no_prune_empty_dirs and delete_on_success_default:
                             prune_empty_dirs_upwards(src.parent, DOCS_DIR)
                     else:
                         # Do NOT delete .doc here (not an up-to-date case)
@@ -721,8 +733,8 @@ def main():
                     if convert_csv_like(src, out, max_rows=args.max_rows_per_sheet):
                         log(f"  [ok] {ext.upper().lstrip('.')} -> {out.relative_to(OUT_DIR)}")
                         converted += 1
-                        delete_on_success(src, args.delete_source_on_success)
-                        if not args.no_prune_empty_dirs and args.delete_source_on_success:
+                        delete_on_success(src, delete_on_success_default)
+                        if not args.no_prune_empty_dirs and delete_on_success_default:
                             prune_empty_dirs_upwards(src.parent, DOCS_DIR)
                     else:
                         skipped += 1
@@ -731,16 +743,16 @@ def main():
                     if convert_excel(src, out, max_rows=args.max_rows_per_sheet, soffice_path=soffice_path):
                         log(f"  [ok] EXCEL -> {out.relative_to(OUT_DIR)}")
                         converted += 1
-                        delete_on_success(src, args.delete_source_on_success)
-                        if not args.no_prune_empty_dirs and args.delete_source_on_success:
+                        delete_on_success(src, delete_on_success_default)
+                        if not args.no_prune_empty_dirs and delete_on_success_default:
                             prune_empty_dirs_upwards(src.parent, DOCS_DIR)
                     else:
                         skipped += 1
 
                 else:
                     log(f"  [skip] unsupported: {rel}")
-                    delete_unsupported(src, args.delete_unsupported)
-                    if not args.no_prune_empty_dirs and args.delete_unsupported:
+                    delete_unsupported(src, delete_unsupported_default)
+                    if not args.no_prune_empty_dirs and delete_unsupported_default:
                         prune_empty_dirs_upwards(src.parent, DOCS_DIR)
                     skipped += 1
 
